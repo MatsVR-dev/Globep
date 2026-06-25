@@ -1,22 +1,19 @@
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 import pathlib as path
 from pathlib import Path
-import colorama
-import time
 import tempfile
 import platform
 import requests
-import tqdm
-from tqdm import tqdm
 import zipfile
 import shutil
-import subprocess
+import threading
 
 temp_path = tempfile.gettempdir()
 temp_path = Path(temp_path)
 temp_path = Path(temp_path) / "Globep_TempFiles"
-
+temp_path.mkdir(exist_ok=True)
+game_path = ""
 # make sure temp dir is empty
 for item in Path(temp_path).iterdir():
     if item.is_file():
@@ -24,130 +21,179 @@ for item in Path(temp_path).iterdir():
     elif item.is_dir():
         shutil.rmtree(item)
 
-print("Select Game EXE file to inject BepinEx")
-game_path = filedialog.askopenfilename(
-    title="Select Unity Game EXE",
-    filetypes=[("Executable Files", "*.exe")]
+BEPINEX_VERSION = "5.4.23.5"
+BASE_URL = (
+    f"https://github.com/BepInEx/BepInEx/releases/download/v{BEPINEX_VERSION}/"
 )
-game = Path(game_path)
 
 versions = {
-    "win_x64" : "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_win_x64_5.4.23.5.zip",
-    "win_x86" : "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_win_x86_5.4.23.5.zip",
-    "lin_x64": "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_linux_x64_5.4.23.5.zip",
-    "lin_x86": "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_linux_x86_5.4.23.5.zip",
-    "mac": "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_macos_universal_5.4.23.5.zip",
+    "win_x64": BASE_URL + f"BepInEx_win_x64_{BEPINEX_VERSION}.zip",
+    "win_x86": BASE_URL + f"BepInEx_win_x86_{BEPINEX_VERSION}.zip",
+    "lin_x64": BASE_URL + f"BepInEx_linux_x64_{BEPINEX_VERSION}.zip",
+    "lin_x86": BASE_URL + f"BepInEx_linux_x86_{BEPINEX_VERSION}.zip",
+    "mac": BASE_URL + f"BepInEx_macos_universal_{BEPINEX_VERSION}.zip",
 }
 
-def download_file(url, folder, filename=None):
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Globep")
+        self.root.geometry("500x300")
 
-    if filename is None:
-        filename = url.split("/")[-1]
+        self.progress = ttk.Progressbar(
+            root,
+            orient="horizontal",
+            length=300,
+            mode="determinate"
+        )
+        # Frame for button + status text
+        controls = ttk.Frame(root)
+        controls.pack(pady=10)
+        self.gamepath = ttk.Label(controls, text="Please choose a file")
+        self.gamepath.pack(side="left", padx=(0, 10))
 
-    file_path = folder / filename
+        self.pickfile = tk.Button(controls,text="Choose EXE",command=self.pick)
+        self.pickfile.pack(side="left", padx=5)
 
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
+        self.injectbutton = tk.Button(controls,text="Inject",command=self.injectstart, state="disabled")
+        self.injectbutton.pack(side="left", padx=5)
 
-    total_size = int(response.headers.get("content-length", 0))
+        self.progress.pack(pady=5)
 
-    with open(file_path, "wb") as f, tqdm(
-        desc=filename,
-        total=total_size,
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024
-    ) as bar:
+        self.log = tk.Text(root, height=20, width=60)
+        self.log.pack(pady=10)
 
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-                bar.update(len(chunk))
+    def write_log(self, message):
+        self.log.insert(tk.END, message + "\n")
+        self.log.see(tk.END)
 
-    return str(file_path)
+    def injectstart(self):
+        self.injectbutton.config(state="disabled")
+        self.progress["value"] = 0
+        self.log.delete("1.0", tk.END)
+        os_name = platform.system()
+        arch = platform.architecture()[0]
+        if os_name == "Windows":
+            if arch == "64bit":
+                thread = threading.Thread(target=self.inject("win_x64"))
+                thread.daemon = True
+                thread.start()
+            else:
+                thread = threading.Thread(target=self.inject("win_x86"))
+                thread.daemon = True
+                thread.start()
+        elif os_name == "Linux":
+            if arch == "64bit":
+                thread = threading.Thread(target=self.inject("lin_x64"))
+                thread.daemon = True
+                thread.start()
+            else:
+                thread = threading.Thread(target=self.inject("lin_x86"))
+                thread.daemon = True
+                thread.start()
+        elif os_name == "Darwin":  # MacOS
+            thread = threading.Thread(target=self.inject("mac"))
+            thread.daemon = True
+            thread.start()
+        else:
+            self.write_log("!FATAL_ERROR! Could Not Recognize Your PC")
 
-def unzip_file(zip_path, extract_to):
-    extract_to = Path(extract_to)
-    extract_to.mkdir(parents=True, exist_ok=True)
+    def download_file(self, url, folder, filename=None):
+        folder = Path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-        zip_ref.extractall(extract_to)
+        if filename is None:
+            filename = url.split("/")[-1]
 
-def move_all(src, dst):
-    src = Path(src)
-    dst = Path(dst)
+        file_path = folder / filename
 
-    dst.mkdir(parents=True, exist_ok=True)
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
 
-    for item in src.iterdir():
-        target = dst / item.name
+        total_size = int(response.headers.get("content-length", 0))
 
-        if item.is_dir():
-            if target.exists():
-                move_all(item, target)
-                item.rmdir()
+        self.write_log("downloading bepinex_zipped.zip: " + url)
+        self.progress["maximum"] = total_size
+        self.progress["value"] = 0
+
+        with open(file_path, "wb") as f:
+            downloaded = 0
+
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+                    downloaded += len(chunk)
+
+                    self.progress["value"] = downloaded
+                    self.root.update_idletasks()
+
+        return str(file_path)
+
+    def unzip_file(self, zip_path, extract_to):
+        self.write_log("Unzipping: " + str(zip_path) + " To: " + str(extract_to))
+        extract_to = Path(extract_to)
+        extract_to.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(extract_to)
+
+    def move_all(self, src, dst):
+        self.write_log("Moving Files")
+        src = Path(src)
+        dst = Path(dst)
+
+        dst.mkdir(parents=True, exist_ok=True)
+
+        for item in src.iterdir():
+            target = dst / item.name
+
+            if item.is_dir():
+                if target.exists():
+                    self.move_all(item, target)
+                    item.rmdir()
+                else:
+                    shutil.move(str(item), str(target))
             else:
                 shutil.move(str(item), str(target))
-        else:
-            shutil.move(str(item), str(target))
 
-def inject(version):
-    bepinex = Path(temp_path)
-    bepinex = Path(temp_path) / "bepinex"
-    unzip_file(download_file(versions[version], temp_path, "bepinex_zipped.zip"), bepinex)
-    move_all(bepinex, game_path)
-    print("after game opens please close it")
-    subprocess.run(game)
-    print(colorama.Fore.GREEN + "INSTALL FINISHED")
-    time.sleep(2)
-    exit()
+    def inject(self, version):
+        bepinex = Path(temp_path)
+        bepinex = Path(temp_path) / "bepinex"
+        self.unzip_file(self.download_file(versions[version], temp_path, "bepinex_zipped.zip"), bepinex)
+        self.move_all(bepinex, game_path)
+        self.write_log("Please run game atleast once before installing any plugins/mods")
+        self.write_log("INSTALL FINISHED")
+        self.injectbutton.config(state="normal")
 
-game_path = Path(game_path)
-game_path = game_path.parent
-temp_path.mkdir(exist_ok=True)
+    def pick(self):
+        self.pickfile.config(state="disabled")
+        self.write_log("Choose Game EXE")
+        game_path = filedialog.askopenfilename(
+            title="Select Unity Game EXE",
+            filetypes=[("Executable Files", "*.exe")]
+        )
+        game_path = Path(game_path)
+        game = Path(game_path)
+        game_path = game_path.parent
+        if (
+                (game_path / "UnityPlayer.dll").is_file()
+                and (game_path / "UnityCrashHandler64.exe").is_file()
+                and (game_path / "MonoBleedingEdge").is_dir()
+                and any(
+            p.is_dir() and p.name.endswith("_Data")
+            for p in game_path.iterdir()
+        )
+        ):
+            self.write_log("Chose Game: " + str(game.name))
+            self.gamepath.config(text=str(game.name))
+            self.pickfile.config(state="normal")
+            self.injectbutton.config(state="normal")
+        else:
+            self.write_log("Game Not Recognized as a valid unity game, Please try again")
+            self.pickfile.config(state="normal")
+            self.injectbutton.config(state="disabled")
 
-if (
-    (game_path / "UnityPlayer.dll").is_file()
-    and (game_path / "UnityCrashHandler64.exe").is_file()
-    and (game_path / "MonoBleedingEdge").is_dir()
-    and any(
-        p.is_dir() and p.name.endswith("_Data")
-        for p in game_path.iterdir()
-    )
-):
-    os_name = platform.system()
-    arch = platform.architecture()[0]
-    if os_name == "Windows":
-        if arch == "64bit":
-            inject("win_x64")
-        else:
-            inject("win_x86")
-    elif os_name == "Linux":
-        if arch == "64bit":
-            inject("lin_x64")
-        else:
-            inject("lin_x86")
-    elif os_name == "Darwin": # MacOS
-        inject("mac")
-    else:
-        print(colorama.Fore.RED + "Could Not Recognize Your Computer. Computer is recognized as " + colorama.Fore.BLUE + os_name)
-        print("3...")
-        time.sleep(1)
-        print("2...")
-        time.sleep(1)
-        print("1...")
-        time.sleep(1)
-        print("0...  Exiting")
-        quit()
-else:
-    print(colorama.Fore.RED + "Game not recognised as a Unity game, exiting in")
-    print("3...")
-    time.sleep(1)
-    print("2...")
-    time.sleep(1)
-    print("1...")
-    time.sleep(1)
-    print("0...  Exiting")
-    quit()
+root = tk.Tk()
+app = App(root)
+root.mainloop()
